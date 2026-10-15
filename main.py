@@ -2,10 +2,9 @@
 Secrets/configuration are read from environment variables only.
 """
 from __future__ import annotations
-import os, logging, asyncio, html
+import os, logging, asyncio, html, sqlite3
 from datetime import datetime
 from aiohttp import web
-import aiomysql
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
@@ -15,51 +14,67 @@ logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'), format='%(asctime)s %(
 log = logging.getLogger('animebot')
 TOKEN = os.getenv('BOT_TOKEN', '').strip()
 ADMIN_IDS = {int(x.strip()) for x in os.getenv('ADMIN_IDS', '').replace(';', ',').split(',') if x.strip().isdigit()}
-DB_HOST = os.getenv('DB_HOST', '').strip()
-DB_PORT = int(os.getenv('DB_PORT', '3306'))
-DB_NAME = os.getenv('DB_NAME', '').strip()
-DB_USER = os.getenv('DB_USER', '').strip()
-DB_PASSWORD = os.getenv('DB_PASSWORD', '')
+# Local SQLite storage: no DB_HOST / DB_NAME / DB_USER / DB_PASSWORD required.
+DB_PATH = os.getenv('SQLITE_PATH', 'bot_data.sqlite3')
 CURRENCY = os.getenv('CURRENCY', "so'm")
 VIP_PRICE = int(os.getenv('VIP_PRICE', '25000'))
+REFERRAL_BONUS = int(os.getenv('REFERRAL_BONUS', '1000'))
 GUIDE_TEXT = os.getenv('GUIDE_TEXT', "📚 Qo‘llanma: kerakli bo‘limni tanlang va anime nomi yoki kodini yuboring.")
 SPONSOR_TEXT = os.getenv('SPONSOR_TEXT', 'Reklama va hamkorlik uchun admin bilan bog‘laning.')
 START_TEXT = os.getenv('START_TEXT', 'Assalomu alaykum, {name}! 🎬 Anime botiga xush kelibsiz.')
 WEB_URL = os.getenv('ANIME_WEB_URL', '').strip()
 BOT_ENABLED = os.getenv('BOT_ENABLED', 'true').lower() not in ('0','false','off','no')
 
-pool = None
+db_ready = False
 
 async def db_init():
-    global pool
-    if not all((DB_HOST, DB_NAME, DB_USER, DB_PASSWORD)):
-        log.warning('MySQL env vars incomplete; DB-backed features will be unavailable until configured.')
-        return
-    pool = await aiomysql.create_pool(host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD,
-        db=DB_NAME, charset='utf8mb4', autocommit=True, minsize=1, maxsize=8, connect_timeout=10)
-    schema = [
-      "CREATE TABLE IF NOT EXISTS user_id (id INT AUTO_INCREMENT PRIMARY KEY, user_id VARCHAR(250) NOT NULL UNIQUE, status TEXT NOT NULL, refid VARCHAR(32) NOT NULL DEFAULT '', sana VARCHAR(250) NOT NULL DEFAULT '') CHARACTER SET utf8mb4",
-      "CREATE TABLE IF NOT EXISTS kabinet (id INT AUTO_INCREMENT PRIMARY KEY, user_id VARCHAR(250) NOT NULL UNIQUE, pul VARCHAR(250) NOT NULL DEFAULT '0', pul2 VARCHAR(250) NOT NULL DEFAULT '0', odam VARCHAR(250) NOT NULL DEFAULT '0', ban TEXT NOT NULL DEFAULT 'unban') CHARACTER SET utf8mb4",
-      "CREATE TABLE IF NOT EXISTS animelar (id INT AUTO_INCREMENT PRIMARY KEY, nom TEXT NOT NULL, rams TEXT NOT NULL, qismi TEXT NOT NULL, davlat TEXT NOT NULL, tili TEXT NOT NULL, yili TEXT NOT NULL, janri TEXT NOT NULL, qidiruv INT NOT NULL DEFAULT 0, sana TEXT NOT NULL, aniType TEXT, `like` INT DEFAULT 0, deslike INT DEFAULT 0) CHARACTER SET utf8mb4",
-      "CREATE TABLE IF NOT EXISTS anime_datas (data_id INT AUTO_INCREMENT PRIMARY KEY, id TEXT NOT NULL, file_id TEXT NOT NULL, qism TEXT NOT NULL, sana TEXT NULL) CHARACTER SET utf8mb4",
-      "CREATE TABLE IF NOT EXISTS channels (id INT AUTO_INCREMENT PRIMARY KEY, channelId VARCHAR(32) NOT NULL, channelType VARCHAR(255) NOT NULL DEFAULT 'channel', channelLink VARCHAR(255) NOT NULL) CHARACTER SET utf8mb4",
-      "CREATE TABLE IF NOT EXISTS joinRequests (id INT AUTO_INCREMENT PRIMARY KEY, channelId VARCHAR(32) NOT NULL, userId VARCHAR(255) NOT NULL) CHARACTER SET utf8mb4",
-      "CREATE TABLE IF NOT EXISTS status (id INT AUTO_INCREMENT PRIMARY KEY, user_id VARCHAR(250) NOT NULL, kun VARCHAR(250) NOT NULL DEFAULT '', date TEXT NOT NULL) CHARACTER SET utf8mb4",
-      "CREATE TABLE IF NOT EXISTS send (send_id INT AUTO_INCREMENT PRIMARY KEY, time1 TEXT NOT NULL, time2 TEXT NOT NULL, start_id TEXT NOT NULL, stop_id TEXT NOT NULL, admin_id TEXT NOT NULL, message_id TEXT NOT NULL, reply_markup TEXT NOT NULL, step TEXT NOT NULL, time3 TEXT NOT NULL, time4 TEXT NOT NULL, time5 TEXT NOT NULL) CHARACTER SET utf8mb4"
-    ]
-    async with pool.acquire() as conn:
-        async with conn.cursor() as cur:
-            for sql in schema: await cur.execute(sql)
-    log.info('MySQL connected and required tables checked.')
+    """Create local SQLite storage automatically; no external database credentials."""
+    global db_ready
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        schema = [
+          "CREATE TABLE IF NOT EXISTS user_id (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'Oddiy', refid TEXT NOT NULL DEFAULT '', sana TEXT NOT NULL DEFAULT '', vip_until TEXT NOT NULL DEFAULT '')",
+          "CREATE TABLE IF NOT EXISTS kabinet (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL UNIQUE, pul TEXT NOT NULL DEFAULT '0', pul2 TEXT NOT NULL DEFAULT '0', odam TEXT NOT NULL DEFAULT '0', ban TEXT NOT NULL DEFAULT 'unban')",
+          "CREATE TABLE IF NOT EXISTS animelar (id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT NOT NULL, rams TEXT NOT NULL, qismi TEXT NOT NULL DEFAULT '1', davlat TEXT NOT NULL DEFAULT '—', tili TEXT NOT NULL DEFAULT 'O‘zbekcha', yili TEXT NOT NULL DEFAULT '—', janri TEXT NOT NULL DEFAULT '—', qidiruv INTEGER NOT NULL DEFAULT 0, sana TEXT NOT NULL DEFAULT '', aniType TEXT, `like` INTEGER DEFAULT 0, deslike INTEGER DEFAULT 0)",
+          "CREATE TABLE IF NOT EXISTS anime_datas (data_id INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL, file_id TEXT NOT NULL, qism TEXT NOT NULL, sana TEXT DEFAULT '')",
+          "CREATE TABLE IF NOT EXISTS channels (id INTEGER PRIMARY KEY AUTOINCREMENT, channelId TEXT NOT NULL UNIQUE, channelType TEXT NOT NULL DEFAULT 'channel', channelLink TEXT NOT NULL)",
+          "CREATE TABLE IF NOT EXISTS joinRequests (id INTEGER PRIMARY KEY AUTOINCREMENT, channelId TEXT NOT NULL, userId TEXT NOT NULL)",
+          "CREATE TABLE IF NOT EXISTS status (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, kun TEXT NOT NULL DEFAULT '', date TEXT NOT NULL DEFAULT '')",
+          "CREATE TABLE IF NOT EXISTS send (send_id INTEGER PRIMARY KEY AUTOINCREMENT, time1 TEXT NOT NULL DEFAULT '', time2 TEXT NOT NULL DEFAULT '', start_id TEXT NOT NULL DEFAULT '', stop_id TEXT NOT NULL DEFAULT '', admin_id TEXT NOT NULL DEFAULT '', message_id TEXT NOT NULL DEFAULT '', reply_markup TEXT NOT NULL DEFAULT '', step TEXT NOT NULL DEFAULT '', time3 TEXT NOT NULL DEFAULT '', time4 TEXT NOT NULL DEFAULT '', time5 TEXT NOT NULL DEFAULT '')"
+        ]
+        for sql in schema:
+            conn.execute(sql)
+        cols = [row[1] for row in conn.execute('PRAGMA table_info(user_id)').fetchall()]
+        if 'vip_until' not in cols:
+            conn.execute("ALTER TABLE user_id ADD COLUMN vip_until TEXT NOT NULL DEFAULT ''")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_anime_datas_anime ON anime_datas(id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_anime_name ON animelar(nom)")
+        conn.commit()
+    finally:
+        conn.close()
+    db_ready = True
+    log.info('Local SQLite storage ready: %s', DB_PATH)
 
 async def query(sql, args=(), one=False, all_rows=False):
-    if pool is None: return None if one else ([] if all_rows else 0)
-    async with pool.acquire() as conn:
-        async with conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute(sql, args)
-            if one: return await cur.fetchone()
-            if all_rows: return await cur.fetchall()
-            return cur.rowcount
+    """SQLite query helper; accepts %s placeholders from the original MySQL-style code."""
+    if not db_ready:
+        return None if one else ([] if all_rows else 0)
+    sql = sql.replace('%s', '?').replace('INSERT IGNORE INTO', 'INSERT OR IGNORE INTO').replace('AS UNSIGNED', 'AS INTEGER').replace('AS DECIMAL(12,2)', 'AS REAL')
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.execute(sql, args)
+        if one:
+            row = cur.fetchone()
+            return dict(row) if row else None
+        if all_rows:
+            return [dict(row) for row in cur.fetchall()]
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
 
 def is_admin(uid): return uid in ADMIN_IDS
 
@@ -79,13 +94,18 @@ async def ensure_user(update: Update, refid=''):
     u = update.effective_user
     if not u: return
     uid = str(u.id); today = datetime.now().strftime('%d.%m.%Y')
-    if pool:
-        old = await query('SELECT user_id FROM user_id WHERE user_id=%s', (uid,), one=True)
-        if not old:
-            await query('INSERT INTO user_id(user_id,status,refid,sana) VALUES(%s,%s,%s,%s)', (uid,'Oddiy',refid,today))
-            await query("INSERT IGNORE INTO kabinet(user_id,pul,pul2,odam,ban) VALUES(%s,'0','0','0','unban')", (uid,))
-            if refid.isdigit() and refid != uid:
-                await query('UPDATE kabinet SET odam=CAST(odam AS UNSIGNED)+1 WHERE user_id=%s', (refid,))
+    old = await query('SELECT user_id FROM user_id WHERE user_id=%s', (uid,), one=True)
+    if not old:
+        await query('INSERT INTO user_id(user_id,status,refid,sana) VALUES(%s,%s,%s,%s)', (uid,'Oddiy',refid,today))
+        await query("INSERT OR IGNORE INTO kabinet(user_id,pul,pul2,odam,ban) VALUES(%s,'0','0','0','unban')", (uid,))
+        if refid.isdigit() and refid != uid:
+            inviter = await query('SELECT user_id FROM user_id WHERE user_id=%s', (refid,), one=True)
+            if inviter:
+                await query('UPDATE kabinet SET odam=CAST(odam AS INTEGER)+1, pul=CAST(pul AS REAL)+?, pul2=CAST(pul2 AS REAL)+? WHERE user_id=%s', (REFERRAL_BONUS, REFERRAL_BONUS, refid))
+    # Automatically expire VIP when its paid period has ended.
+    state = await query('SELECT status,vip_until FROM user_id WHERE user_id=%s', (uid,), one=True)
+    if state and state.get('status') == 'VIP' and state.get('vip_until') and state['vip_until'] < datetime.now().date().isoformat():
+        await query("UPDATE user_id SET status='Oddiy' WHERE user_id=%s", (uid,))
 
 def user_state(uid): return query('SELECT * FROM user_id WHERE user_id=%s', (str(uid),), one=True)
 
@@ -151,8 +171,8 @@ async def show_anime(chat_id, context, anime_id):
     caption=(f"<b>🎬 Nomi: {html.escape(str(a['nom']))}</b>\n\n🎥 Qismi: {html.escape(str(a.get('qismi','—')))}\n"
       f"🌍 Davlati: {html.escape(str(a.get('davlat','—')))}\n🇺🇿 Tili: {html.escape(str(a.get('tili','—')))}\n"
       f"📆 Yili: {html.escape(str(a.get('yili','—')))}\n🎞 Janri: {html.escape(str(a.get('janri','—')))}\n\n🔍 Qidirishlar: {int(a.get('qidiruv') or 0)+1}")
-    kb=InlineKeyboardMarkup([[InlineKeyboardButton('📥 Qismlarni ko‘rish / yuklab olish',callback_data=f"episodes:{anime_id}")]])
-    if is_admin(chat_id): kb=InlineKeyboardMarkup([[InlineKeyboardButton('📥 Qismlar',callback_data=f'episodes:{anime_id}')],[InlineKeyboardButton('🗑 Anime o‘chirish',callback_data=f'delanime:{anime_id}')]])
+    kb=InlineKeyboardMarkup([[InlineKeyboardButton('📥 Qismlarni ko‘rish / yuklab olish',callback_data=f"episodes:{anime_id}")], [InlineKeyboardButton('👍 Yoqdi',callback_data=f'vote:like:{anime_id}'),InlineKeyboardButton('👎 Yoqmadi',callback_data=f'vote:dislike:{anime_id}')]])
+    if is_admin(chat_id): kb=InlineKeyboardMarkup([[InlineKeyboardButton('📥 Qismlar',callback_data=f'episodes:{anime_id}')],[InlineKeyboardButton('✏️ Tahrirlash',callback_data=f'edit_anime:{anime_id}')],[InlineKeyboardButton('📢 Kanallarga post',callback_data=f'post_anime:{anime_id}')],[InlineKeyboardButton('🗑 Anime o‘chirish',callback_data=f'delanime:{anime_id}')]])
     file_id=str(a.get('rams') or '')
     try:
         if file_id.startswith('B') or file_id.startswith('BA'):
@@ -178,7 +198,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data.startswith('search_'):
         mode=data.split('_',1)[1]; context.user_data['search_mode']=mode
-        prompt={'name':'Anime nomini yuboring:','code':'Anime kodini yuboring:','genre':'Janr nomini yuboring:'}.get(mode,'Qidiruv so‘zini yuboring:')
+        prompt={'name':'Anime nomini yuboring:','code':'Anime kodini yuboring:','genre':'Janr nomini yuboring:','image':'Anime bazasida bor rasmni yuboring:'}.get(mode,'Qidiruv so‘zini yuboring:')
         await q.message.reply_text(prompt); return
     if data in ('latest','popular','all'):
         if data=='latest': sql='SELECT id,nom FROM animelar ORDER BY id DESC LIMIT 15'
@@ -199,8 +219,57 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data.startswith('delanime:') and is_admin(uid):
         aid=data.split(':',1)[1]; await query('DELETE FROM anime_datas WHERE id=%s',(aid,)); await query('DELETE FROM animelar WHERE id=%s',(aid,)); await q.message.reply_text('🗑 Anime va uning qismlari o‘chirildi.'); return
+    if data.startswith('vote:'):
+        _, vote, anime_id = data.split(':', 2)
+        column = 'like' if vote == 'like' else 'deslike'
+        await query(f'UPDATE animelar SET `{column}`=COALESCE(`{column}`,0)+1 WHERE id=%s',(anime_id,))
+        return
+    if data.startswith('edit_anime:') and is_admin(uid):
+        anime_id=data.split(':',1)[1]
+        context.user_data['admin_action']='edit_anime_field'; context.user_data['edit_anime_id']=anime_id
+        await q.message.reply_text('Qaysi ma’lumotni tahrirlaysiz?\nFormat: maydon=qiymat\nMaydonlar: nom, qismi, davlat, tili, yili, janri')
+        return
+    if data.startswith('post_anime:') and is_admin(uid):
+        anime_id=data.split(':',1)[1]
+        anime=await query('SELECT * FROM animelar WHERE id=%s',(anime_id,),one=True)
+        channels=await query('SELECT channelId FROM channels',all_rows=True) or []
+        if not anime: await q.message.reply_text('Anime topilmadi.'); return
+        if not channels: await q.message.reply_text('Avval 📢 Kanallar bo‘limidan kanal qo‘shing.'); return
+        ok=0; fail=0
+        for ch in channels:
+            try:
+                await context.bot.send_photo(ch['channelId'],anime['rams'],caption=f"🎬 {anime['nom']}\nQismi: {anime['qismi']}\nJanr: {anime['janri']}\nKodi: {anime['id']}")
+                ok+=1
+            except TelegramError:
+                try:
+                    await context.bot.send_video(ch['channelId'],anime['rams'],caption=f"🎬 {anime['nom']}\nKodi: {anime['id']}")
+                    ok+=1
+                except TelegramError: fail+=1
+        await q.message.reply_text(f'Post yuborildi. Muvaffaqiyatli: {ok}, xato: {fail}')
+        return
     if data=='vip_buy':
-        await q.message.reply_text(f'💎 VIP narxi: {VIP_PRICE} {CURRENCY}. To‘lovdan so‘ng admin bilan bog‘laning.'); return
+        await q.message.reply_text(f'💎 VIP obunasi: 30 kun — {VIP_PRICE} {CURRENCY}; 60 kun — {VIP_PRICE*2}; 90 kun — {VIP_PRICE*3}.',reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('30 kun',callback_data='shop:30'),InlineKeyboardButton('60 kun',callback_data='shop:60'),InlineKeyboardButton('90 kun',callback_data='shop:90')]])); return
+    if data.startswith('shop:'):
+        days=int(data.split(':',1)[1]); price=VIP_PRICE*(days//30)
+        wallet=await query('SELECT pul FROM kabinet WHERE user_id=%s',(str(uid),),one=True) or {}
+        try: balance=float(wallet.get('pul') or 0)
+        except (ValueError,TypeError): balance=0
+        if balance < price:
+            await q.message.reply_text(f'Balans yetarli emas. Kerak: {price} {CURRENCY}; balans: {balance}. Admin bilan bog‘laning.'); return
+        until=datetime.now().date()
+        old=await query('SELECT vip_until FROM user_id WHERE user_id=%s',(str(uid),),one=True) or {}
+        try:
+            from datetime import date, timedelta
+            prior=date.fromisoformat(old.get('vip_until','')) if old.get('vip_until') else date.today()
+            if prior > date.today(): until=prior
+            until=until+timedelta(days=days)
+        except ValueError:
+            from datetime import timedelta
+            until=date.today()+timedelta(days=days)
+        await query('UPDATE kabinet SET pul=? WHERE user_id=?',(str(balance-price),str(uid)))
+        await query("UPDATE user_id SET status='VIP',vip_until=? WHERE user_id=?",(until.isoformat(),str(uid)))
+        await q.message.reply_text(f'✅ VIP {days} kunga faollashtirildi. Tugash sanasi: {until.isoformat()}')
+        return
     if data=='admin_cancel':
         context.user_data.pop('admin_action',None); await q.message.reply_text('Bekor qilindi.',reply_markup=admin_keyboard()); return
     if data=='admin_add_anime' and is_admin(uid):
@@ -290,15 +359,22 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not row: await msg.reply_text('Foydalanuvchi topilmadi.'); return
             context.user_data.pop('admin_action',None)
             await msg.reply_text(f"ID: {row['user_id']}\nStatus: {row['status']}\nBalans: {row.get('pul')}\nTakliflar: {row.get('odam')}\nBan: {row.get('ban')}",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Boshqarish',callback_data=f"user:{row['user_id']}")]])); return
-        if action in ('addmoney:','remmoney:'):
+        if action in ('addmoney','remmoney'):
             try: amount=float(text)
             except ValueError: await msg.reply_text('Faqat raqam yuboring.'); return
             target=context.user_data.get('target_user'); col='pul'
             row=await query('SELECT pul FROM kabinet WHERE user_id=%s',(target,),one=True)
             if not row: await msg.reply_text('Foydalanuvchi topilmadi.'); return
             balance=float(row.get('pul') or 0); balance=balance+amount if action=='addmoney:' else balance-amount
-            await query('UPDATE kabinet SET pul=%s,pul2=CAST(pul2 AS DECIMAL(12,2))+%s WHERE user_id=%s',(str(balance),amount if action=='addmoney:' else -amount,target))
+            await query('UPDATE kabinet SET pul=?,pul2=CAST(pul2 AS REAL)+? WHERE user_id=?',(str(balance),amount if action=='addmoney:' else -amount,target))
             context.user_data.clear(); await msg.reply_text(f'Yangi balans: {balance} {CURRENCY}',reply_markup=admin_keyboard()); return
+        if action=='edit_anime_field':
+            if '=' not in text: await msg.reply_text('Format: maydon=qiymat'); return
+            field,value=[x.strip() for x in text.split('=',1)]
+            if field not in {'nom','qismi','davlat','tili','yili','janri'}: await msg.reply_text('Ruxsat etilgan maydon: nom, qismi, davlat, tili, yili, janri'); return
+            await query(f'UPDATE animelar SET {field}=%s WHERE id=%s',(value,context.user_data.get('edit_anime_id')))
+            context.user_data.pop('admin_action',None); context.user_data.pop('edit_anime_id',None)
+            await msg.reply_text('✅ Anime ma’lumoti yangilandi.',reply_markup=admin_keyboard()); return
         if action=='broadcast':
             rows=await query('SELECT user_id FROM user_id',all_rows=True) or []; ok=0; fail=0
             for row in rows:
@@ -322,6 +398,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query('INSERT INTO animelar(nom,rams,qismi,davlat,tili,yili,janri,qidiruv,sana,aniType) VALUES(%s,%s,%s,%s,%s,%s,%s,0,%s,%s)',(a['nom'],a['rams'],parts[0],parts[1],parts[2],parts[3],parts[4],datetime.now().strftime('%Y-%m-%d %H:%M:%S'),'anime'))
             context.user_data.clear(); await msg.reply_text('✅ Anime bazaga qo‘shildi.',reply_markup=admin_keyboard()); return
     mode=context.user_data.get('search_mode')
+    if mode=='image':
+        context.user_data.pop('search_mode',None)
+        if not msg.photo:
+            await msg.reply_text('Iltimos, rasm yuboring.'); return
+        file_id=msg.photo[-1].file_id
+        found=await query('SELECT id FROM animelar WHERE rams=%s',(file_id,),one=True)
+        if found and await gate(update,context,uid): await show_anime(msg.chat_id,context,found['id'])
+        else: await msg.reply_text('Bu rasm bo‘yicha anime topilmadi.')
+        return
     if mode:
         context.user_data.pop('search_mode',None)
         if not await gate(update,context,uid): return
@@ -372,6 +457,6 @@ async def main():
             await asyncio.Event().wait()
         finally:
             await application.updater.stop(); await application.stop(); await runner.cleanup()
-            if pool: pool.close(); await pool.wait_closed()
+
 
 if __name__=='__main__': asyncio.run(main())
