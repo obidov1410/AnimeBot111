@@ -30,20 +30,18 @@ _SMALL_CAPS = str.maketrans({
 def small_caps(value):
     return str(value).translate(_SMALL_CAPS)
 def InlineKeyboardButton(*, text, **kwargs):
-    """Owner sozlagan tugma nomi va rangini qo'llaydi."""
+    """Tugma sozlamalarini har tugmada diskdan o'qimasdan, xotiradagi ma'lumotdan oladi."""
     try:
-        path = Path(os.getenv("DATA_FILE", "data.json"))
-        if path.exists():
-            _cfg = json.loads(path.read_text(encoding="utf-8")).get("settings", {})
-            _cb = str(kwargs.get("callback_data", ""))
-            _custom_text = _cfg.get("button_texts", {}).get(_cb)
-            if _custom_text:
-                text = _custom_text
-            _colors = _cfg.get("button_colors", {})
-            _group = _button_color_group(_cb, str(text))
-            _color = _colors.get(_group) or _colors.get("all")
-            if _color in ("primary", "success", "danger"):
-                kwargs.setdefault("style", _color)
+        _cfg = load_data().get("settings", {})
+        _cb = str(kwargs.get("callback_data", ""))
+        _custom_text = _cfg.get("button_texts", {}).get(_cb)
+        if _custom_text:
+            text = _custom_text
+        _colors = _cfg.get("button_colors", {})
+        _group = _button_color_group(_cb, str(text))
+        _color = _colors.get(_group) or _colors.get("all")
+        if _color in ("primary", "success", "danger"):
+            kwargs.setdefault("style", _color)
     except Exception:
         pass
     return TelegramInlineKeyboardButton(text=small_caps(text), **kwargs)
@@ -146,7 +144,7 @@ dp = Dispatcher()
 def default_data():
     return {
         "admins": [OWNER_ID],
-        "start_text": "🍿 <b>KINO VA SERIAL OLAMIGA XUSH KELIBSIZ!</b>\n\nSevimli kinolaringiz va seriallaringizni qidiring va tomosha qiling.\n\n🔎 <b>Kino olami</b>",
+        "start_text": "🎬 <b>Assalomu alaykum, {first}!</b>\n\n🍿 <b>Bugun nima ko'ramiz?</b>",
         "channels": [],
         "animes": {},
         "channel_catalog": {},
@@ -157,7 +155,18 @@ def default_data():
     }
 
 
+# Bitta Render jarayonida JSON faylni har bir tugma/handlerda qayta parse qilmaslik uchun kesh.
+_DATA_CACHE = None
+_DATA_CACHE_MTIME = None
+
 def load_data():
+    global _DATA_CACHE, _DATA_CACHE_MTIME
+    try:
+        current_mtime = DATA_FILE.stat().st_mtime_ns if DATA_FILE.exists() else None
+    except OSError:
+        current_mtime = None
+    if _DATA_CACHE is not None and current_mtime == _DATA_CACHE_MTIME:
+        return _DATA_CACHE
     if not DATA_FILE.exists():
         save_data(default_data())
     try:
@@ -189,6 +198,11 @@ def load_data():
         user.setdefault("favorites", [])
         user.setdefault("last_watched", None)
         user.setdefault("last_seen", user.get("joined_at", 0))
+    _DATA_CACHE = data
+    try:
+        _DATA_CACHE_MTIME = DATA_FILE.stat().st_mtime_ns
+    except OSError:
+        _DATA_CACHE_MTIME = None
     return data
 
 
@@ -197,9 +211,15 @@ def get_setting(name: str):
 
 
 def save_data(data):
+    global _DATA_CACHE, _DATA_CACHE_MTIME
     DATA_FILE.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8"
     )
+    _DATA_CACHE = data
+    try:
+        _DATA_CACHE_MTIME = DATA_FILE.stat().st_mtime_ns
+    except OSError:
+        _DATA_CACHE_MTIME = None
 
 
 def is_owner(user_id: int) -> bool:
@@ -340,17 +360,16 @@ async def send_start(message: Message, user_id=None):
         await remove_msg.delete()
     except Exception:
         pass
-    await message.answer(data["start_text"], reply_markup=main_menu(menu_user_id))
+    tg_user = message.from_user
+    first = (f"@{tg_user.username}" if tg_user.username else (tg_user.first_name or "do'stim"))
+    start_text = data.get("start_text", "🎬 Assalomu alaykum, {first}!\n\n🍿 Bugun nima ko'ramiz?").replace("{first}", first)
+    await message.answer(start_text, reply_markup=main_menu(menu_user_id))
 
 
 def main_menu(user_id=None):
-    # Qidiruvga tegishli katalog, sevimlilar va davom ettirish ichki menyuda.
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔎 Kino va video izlash", callback_data="search_menu")],
-        [InlineKeyboardButton(text="👤 Hisobim", callback_data="account"), InlineKeyboardButton(text="👥 Referal", callback_data="referral")],
-        [InlineKeyboardButton(text="💰 Balans", callback_data="balance_help"), InlineKeyboardButton(text="💎 VIP olish", callback_data="vip_buy")],
-        [InlineKeyboardButton(text="❓ VIP o‘zi nima?", callback_data="vip_info")],
-        [InlineKeyboardButton(text="📖 Qo‘llanma", callback_data="guide")],
+        [InlineKeyboardButton(text="🎬 Kino va serial izlash", callback_data="search_menu")],
+        [InlineKeyboardButton(text="📖 Qo'llanma", callback_data="guide")],
     ])
 
 
@@ -360,47 +379,30 @@ def main_reply_keyboard():
 
 
 def search_menu(user_id=None):
-    vip = bool(user_id and is_vip(user_id))
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔢 Kod bo‘yicha qidirish", callback_data="search"), InlineKeyboardButton(text="🔠 Nom bo‘yicha qidirish", callback_data="search_name")],
-        [InlineKeyboardButton(text="🎞 Kinolar ro‘yxati", callback_data="movie_list")],
-        [InlineKeyboardButton(text="📺 Seriallar ro‘yxati", callback_data="series_list")],
-        [InlineKeyboardButton(text=("▶️ Davom ettirish" if vip else "🔒 Davom ettirish"), callback_data="continue_watching")],
-        [InlineKeyboardButton(text=("♥️ Sevimlilar" if vip else "🔒 Sevimlilar"), callback_data="favorites")],
+        [InlineKeyboardButton(text="🔢 Kod bo'yicha qidirish", callback_data="search"), InlineKeyboardButton(text="🔠 Nom bo'yicha qidirish", callback_data="search_name")],
+        [InlineKeyboardButton(text="🎞 Kinolar ro'yxati", callback_data="movie_list")],
+        [InlineKeyboardButton(text="📺 Seriallar ro'yxati", callback_data="series_list")],
         [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="home")],
     ])
 
 
 def admin_menu():
-    """Oddiy admin menyusi: faqat anime va qismlarni boshqarish."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Kino qo'shish", callback_data="add_movie"), InlineKeyboardButton(text="➕ Serial qo'shish", callback_data="add_series")],
-        [InlineKeyboardButton(text="➕ Qism qo'shish", callback_data="add_episode"),
-         InlineKeyboardButton(text="🗑 Qism o'chirish", callback_data="del_episode")],
-        [InlineKeyboardButton(text="✏️ Nomini o'zgartirish", callback_data="rename_anime"),
-         InlineKeyboardButton(text="🔢 Kodini o'zgartirish", callback_data="recode_anime")],
-        [InlineKeyboardButton(text="🗑 Kino/serial o'chirish", callback_data="del_anime")],
-        [InlineKeyboardButton(text="📊 Statistika", callback_data="stats")],
-        [InlineKeyboardButton(text="🎨 Chiroyli ko‘rinish", callback_data="appearance")],
+        [InlineKeyboardButton(text="➕ Qism qo'shish", callback_data="add_episode")],
     ])
 
 
 def owner_menu():
-    """Faqat egaga ko'rinadigan to'liq boshqaruv menyusi."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Kino qo'shish", callback_data="add_movie"), InlineKeyboardButton(text="➕ Serial qo'shish", callback_data="add_series")],
-        [InlineKeyboardButton(text="➕ Qism qo'shish", callback_data="add_episode"), InlineKeyboardButton(text="🗑 Qism o'chirish", callback_data="del_episode")],
+        [InlineKeyboardButton(text="➕ Qism qo'shish", callback_data="add_episode"), InlineKeyboardButton(text="🗑 Kino/serial o'chirish", callback_data="del_anime")],
         [InlineKeyboardButton(text="✏️ Nomini o'zgartirish", callback_data="rename_anime"), InlineKeyboardButton(text="🔢 Kodini o'zgartirish", callback_data="recode_anime")],
-        [InlineKeyboardButton(text="🗑 Kino/serial o'chirish", callback_data="del_anime")],
-        [InlineKeyboardButton(text="👑 Admin qo'shish", callback_data="add_admin"), InlineKeyboardButton(text="🚫 Admin o'chirish", callback_data="del_admin")],
+        [InlineKeyboardButton(text="👤 Admin qo'shish", callback_data="add_admin"), InlineKeyboardButton(text="➖ Admin o'chirish", callback_data="del_admin")],
         [InlineKeyboardButton(text="📢 Kanal qo'shish", callback_data="add_channel"), InlineKeyboardButton(text="➖ Kanal o'chirish", callback_data="del_channel")],
-        [InlineKeyboardButton(text="📝 /start xabarini o'zgartirish", callback_data="start_text")],
-        [InlineKeyboardButton(text="👥 Obunachilarni boshqarish", callback_data="manage_users")],
-        [InlineKeyboardButton(text="📊 Statistika", callback_data="stats")],
-        [InlineKeyboardButton(text="🎨 Chiroyli ko‘rinish", callback_data="appearance")],
-        [InlineKeyboardButton(text="📣 Hammaga xabar yuborish", callback_data="broadcast")],
-        [InlineKeyboardButton(text="📚 Baza kanalini sozlash", callback_data="setcfg:catalog_channel_id")],
-        [InlineKeyboardButton(text="⚙️ Bot sozlamalari", callback_data="owner_settings")],
+        [InlineKeyboardButton(text="🎨 Tugmaga rang berish", callback_data="appearance")],
+        [InlineKeyboardButton(text="📚 Kino/serial baza kanalini belgilash", callback_data="setcfg:catalog_channel_id")],
     ])
 
 
@@ -592,7 +594,6 @@ def subscription_keyboard():
             label = str(chat_ref) if str(chat_ref).startswith("@") else "Maxfiy kanal"
             rows.append([InlineKeyboardButton(text=f"📢 {label}", url=invite_url)])
     rows.append([InlineKeyboardButton(text="✅ Obunani tekshirish", callback_data="check_sub")])
-    rows.append([InlineKeyboardButton(text="💎 VIP olish", callback_data="vip_buy")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -614,7 +615,7 @@ async def require_subscription_message(message: Message) -> bool:
 @dp.message(CommandStart())
 async def start(message: Message, state: FSMContext):
     await state.clear()
-    await notify_new_user(message.from_user)
+    asyncio.create_task(notify_new_user(message.from_user))
     data = load_data()
     user, _ = ensure_user(data, message.from_user)
     # /start REFERRER_ID deep-link: referal egasini faqat birinchi marta biriktiramiz.
@@ -828,7 +829,7 @@ async def owner_setting_start(call: CallbackQuery, state: FSMContext):
         "vip_month_days": "VIP hisobida bir oy necha kun bo'lishini yuboring (1–365):",
         "vip_early_days": "Yangi kino/serial VIP uchun necha kun oldin ochilishini yuboring (0–30):",
         "admin_contact": "To'lov uchun admin username yuboring, masalan @AnimBot_Admin:",
-        "catalog_channel_id": "Eski umumiy baza kanalining @username yoki -100... ID sini yuboring:",
+        "catalog_channel_id": "Qismlar olinadigan kanalning @username yoki -100... ID sini yuboring. Bot shu kanalda administrator bo'lishi shart:",
         "regular_channel_id": "Oddiy foydalanuvchilar bazasining @username yoki -100... ID sini yuboring. Bot kanalga admin bo‘lishi kerak:",
         "vip_channel_id": "VIP bazasining @username yoki -100... ID sini yuboring. Bot kanalga admin bo‘lishi kerak:",
     }
@@ -1054,14 +1055,14 @@ async def admin_balance_amount_save(message: Message, state: FSMContext):
 async def admin_command(message: Message):
     if not is_admin(message.from_user.id):
         return await message.answer("⛔ Sizda admin huquqi yo'q.")
-    await message.answer("🛠 <b>Admin paneli</b>\nKino va serial kontentlarini boshqarish.", reply_markup=admin_menu())
+    await message.answer("🎬 <b>Kino va serial boshqaruvi</b>", reply_markup=admin_menu())
 
 
 @dp.message(Command("owner"))
 async def owner_command(message: Message):
     if not is_owner(message.from_user.id):
         return await message.answer("⛔ Bu buyruq faqat bot egasi uchun.")
-    await message.answer("👑 <b>Owner paneli</b>\nKino va serial kontentlarini boshqarish.", reply_markup=owner_menu())
+    await message.answer("⚙️ <b>Owner paneli</b>", reply_markup=owner_menu())
 
 
 @dp.callback_query(F.data == "home")
@@ -1086,7 +1087,7 @@ async def search_menu_open(call: CallbackQuery):
 
 @dp.callback_query(F.data == "guide")
 async def guide(call: CallbackQuery):
-    text = "📖 <b>Qo'llanma</b>\n\n1️⃣ Kino va serial izlashni bosing.\n2️⃣ Kod yoki nom orqali qidiring, Kinolar/Seriallar ro‘yxatini oching.\n3️⃣ Kerakli anime qismi yoki kino videosini bosing. Yoqtirganlarga saqlang va Davom ettirish orqali qayting.\n\n🛑 Orqaga tugmasi oldingi menyuga qaytaradi."
+    text = "📖 <b>Qo'llanma</b>\n\n1️⃣ Kino va serial izlashni bosing.\n2️⃣ Kod yoki nom orqali qidiring, yoki ro'yxatdan tanlang.\n3️⃣ Kerakli kino yoki serialni ochib, qism raqamini bosing.\n\n🛑 Orqaga tugmasi oldingi menyuga qaytaradi."
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛑 Orqaga", callback_data="home")]])
     try:
         await call.message.edit_text(text, reply_markup=kb)
@@ -1743,8 +1744,8 @@ async def episode_season_select(message: Message, state: FSMContext):
     await state.update_data(batch_season=season_no, batch_count=0)
     await state.set_state(Form.episode_batch)
     prompt = await message.answer(
-        f"🎬 <b>{item['name']}</b> · <b>{season_no}-fasl</b>\nVideolarni ketma-ket yuboring.\n"
-        "Bot shu faslda avtomatik 1-qism, 2-qism, 3-qism deb raqamlaydi.\n"
+        f"🎬 <b>{item['name']}</b> · <b>{season_no}-fasl</b>\nQismlar olinadigan kanaldagi postlarni botga forward qiling.\n"
+        "Bot faqat bot administrator bo'lgan kanaldan forward qilingan postlarni qabul qiladi va 1-qism, 2-qism deb raqamlaydi.\n"
         "Tugatish: /done · Bekor qilish: /cancel"
     )
     await state.update_data(progress_message_id=prompt.message_id)
@@ -1752,68 +1753,64 @@ async def episode_season_select(message: Message, state: FSMContext):
 
 @dp.message(Form.episode_batch)
 async def episode_batch_message(message: Message, state: FSMContext):
-    """Admin videolarni botning o'ziga yuboradi; kanal/forward bazasi talab qilinmaydi."""
+    """Qism faqat bot administrator bo'lgan kanaldan forward qilinganda qabul qilinadi."""
     if not is_admin(message.from_user.id):
         await state.clear()
         return await message.answer("⛔ Bu amal faqat adminlar uchun.")
-    if (message.text or "").strip().lower() in ("/done", "done", "tayyor"):
+    text = (message.text or "").strip().lower()
+    if text in ("/done", "done", "tayyor"):
         saved = await state.get_data()
         count = int(saved.get("batch_count", 0))
         await state.clear()
         return await message.answer(f"✅ Yakunlandi. {count} ta qism saqlandi.", reply_markup=admin_menu())
-    if (message.text or "").strip().lower() == "/cancel":
+    if text == "/cancel":
         await state.clear()
         return await message.answer("❎ Bekor qilindi.", reply_markup=admin_menu())
 
-    media_type = None
-    file_id = None
-    caption = (message.caption or "").strip()
-    if message.video:
-        media_type, file_id = "video", message.video.file_id
-    elif message.document:
-        media_type, file_id = "document", message.document.file_id
-    elif message.audio:
-        media_type, file_id = "audio", message.audio.file_id
-    elif message.animation:
-        media_type, file_id = "animation", message.animation.file_id
-    elif message.photo:
-        media_type, file_id = "photo", message.photo[-1].file_id
-    elif message.voice:
-        media_type, file_id = "voice", message.voice.file_id
-    else:
-        return await message.answer("❌ Qism sifatida video yuboring (yoki video faylni hujjat qilib yuboring). Tugatish: /done · Bekor qilish: /cancel")
+    origin = getattr(message, "forward_origin", None)
+    if not origin or getattr(origin, "type", "") != "channel":
+        return await message.answer("❌ Qismni bot administrator bo'lgan Telegram kanalingizdan forward qiling. Oddiy video yoki boshqa chatdan forward qabul qilinmaydi.\nTugatish: /done · Bekor qilish: /cancel")
+    origin_chat = getattr(origin, "chat", None)
+    origin_message_id = getattr(origin, "message_id", None)
+    if not origin_chat or not origin_message_id:
+        return await message.answer("❌ Forward qilingan kanal xabarini aniqlab bo'lmadi. Kanal postini to'g'ridan-to'g'ri forward qiling.")
+    try:
+        me = await bot.get_me()
+        member = await bot.get_chat_member(origin_chat.id, me.id)
+        status = str(member.status).split(".")[-1].lower()
+        if status not in ("administrator", "creator"):
+            return await message.answer("❌ Bot bu kanalda administrator emas. Avval botni kanalga admin qiling.")
+    except Exception:
+        return await message.answer("❌ Kanalni tekshirib bo'lmadi. Bot shu kanalda administrator ekanini tekshiring.")
 
     saved = await state.get_data()
     code = str(saved.get("batch_code", ""))
     data = load_data()
-    anime = data.get("animes", {}).get(code)
-    if not anime:
+    item = data.get("animes", {}).get(code)
+    if not item:
         await state.clear()
-        return await message.answer("❌ Kontent topilmadi. Qaytadan boshlang.", reply_markup=admin_menu())
+        return await message.answer("❌ Kino/serial topilmadi. Qaytadan boshlang.", reply_markup=admin_menu())
     season_no = str(saved.get("batch_season", "1"))
-    season = anime.setdefault("seasons", {}).setdefault(season_no, {"episodes": {}})
+    season = item.setdefault("seasons", {}).setdefault(season_no, {"episodes": {}})
     episodes = season.setdefault("episodes", {})
     numeric = [int(n) for n in episodes if str(n).isdigit()]
     number = max(numeric, default=0) + 1
-    record = {"file_id": file_id, "media_type": media_type, "caption": caption}
+    record = {"chat_id": origin_chat.id, "message_id": origin_message_id}
     episodes[str(number)] = record
-    anime.setdefault("episodes", {})[str(number)] = record
+    if season_no == "1":
+        item.setdefault("episodes", {})[str(number)] = record
     save_data(data)
     count = int(saved.get("batch_count", 0)) + 1
     await state.update_data(batch_count=count)
     progress_id = saved.get("progress_message_id")
     if progress_id:
         try:
-            await bot.edit_message_text(
-                chat_id=message.chat.id,
-                message_id=progress_id,
-                text=(f"🎬 <b>{anime['name']}</b> · {season_no}-fasl\n✅ {count} ta qism saqlandi. Oxirgisi: <b>{number}-qism</b>.\n\n"
-                      "Keyingi videolarni shu chatga ketma-ket yuboring.\nTugatish: /done · Bekor qilish: /cancel")
-            )
+            await bot.edit_message_text(chat_id=message.chat.id, message_id=progress_id,
+                text=f"🎬 <b>{item['name']}</b> · {season_no}-fasl\n✅ {count} ta qism saqlandi. Oxirgisi: <b>{number}-qism</b>.\n\nKanal postlarini forward qilishda davom eting.\nTugatish: /done · Bekor qilish: /cancel")
         except Exception:
-            pass
+            await message.answer(f"✅ {number}-qism saqlandi. Keyingi postni forward qiling yoki /done yozing.")
     else:
-        await message.answer(f"✅ {number}-qism saqlandi. Keyingi videoni yuboring yoki /done yozing.")
+        await message.answer(f"✅ {number}-qism saqlandi. Keyingi postni forward qiling yoki /done yozing.")
 
 @dp.callback_query(F.data == "del_anime")
 async def del_anime(call: CallbackQuery, state: FSMContext):
@@ -2102,7 +2099,6 @@ async def appearance_menu(call: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"🔎 Qidirish tugmalari: {colors.get('search', 'standart')}", callback_data="color_group:search")],
         [InlineKeyboardButton(text=f"🎬 Kontent tugmalari: {colors.get('content', 'standart')}", callback_data="color_group:content")],
-        [InlineKeyboardButton(text=f"💎 VIP tugmalari: {colors.get('vip', 'standart')}", callback_data="color_group:vip")],
         [InlineKeyboardButton(text=f"⬅️ Orqaga tugmalari: {colors.get('back', 'standart')}", callback_data="color_group:back")],
         [InlineKeyboardButton(text=f"🧩 Boshqa tugmalar: {colors.get('other', 'standart')}", callback_data="color_group:other")],
         [InlineKeyboardButton(text="🌈 Barcha tugmalar", callback_data="color_group:all")],
@@ -2119,7 +2115,7 @@ async def color_group_select(call: CallbackQuery):
     if not is_admin(call.from_user.id):
         return await call.answer("Faqat admin va owner uchun", show_alert=True)
     group = call.data.split(":", 1)[1]
-    if group not in {"search", "content", "vip", "back", "other", "all"}:
+    if group not in {"search", "content", "back", "other", "all"}:
         return await call.answer("Noto‘g‘ri guruh", show_alert=True)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🟥 Qizil", callback_data=f"color_set:{group}:danger")],
@@ -2137,7 +2133,7 @@ async def color_set_save(call: CallbackQuery):
     if not is_admin(call.from_user.id):
         return await call.answer("Faqat admin va owner uchun", show_alert=True)
     _, group, color = call.data.split(":", 2)
-    if group not in {"search", "content", "vip", "back", "other", "all"} or color not in {"danger", "success", "primary", "default"}:
+    if group not in {"search", "content", "back", "other", "all"} or color not in {"danger", "success", "primary", "default"}:
         return await call.answer("Noto‘g‘ri rang", show_alert=True)
     data = load_data()
     colors = data.setdefault("settings", {}).setdefault("button_colors", {})
@@ -2162,18 +2158,11 @@ async def color_reset(call: CallbackQuery):
 # Tugma matnlarini owner panelidan almashtirish mumkin. Kalitlar callback_data bilan bog'langan.
 EDITABLE_BUTTONS = {
     "search_menu": "🔎 Kino va serial izlash",
-    "account": "👤 Hisobim",
-    "referral": "👥 Referal",
-    "balance_help": "💰 Balans / hisob to‘ldirish",
-    "vip_buy": "💎 VIP olish",
-    "vip_info": "❓ VIP o‘zi nima?",
     "guide": "📖 Qo‘llanma",
     "search": "🔢 Kod bo‘yicha qidirish",
     "search_name": "🔠 Nom bo‘yicha qidirish",
     "list": "📚 Kino va seriallar ro‘yxati",
     "movie_list": "🎞 Kinolar ro‘yxati",
-    "continue_watching": "▶️ Davom ettirish",
-    "favorites": "♥️ Sevimlilar",
     "home": "⬅️ Orqaga / asosiy menyu",
     "add_anime": "➕ Kino/serial qo‘shish",
     "add_movie": "➕ Kino qo‘shish",
@@ -2409,7 +2398,7 @@ async def fallback(message: Message):
 
 async def health_check(request: web.Request) -> web.Response:
     """Render health check uchun oddiy HTTP endpoint."""
-    return web.Response(text="AnimeBot is running", status=200)
+    return web.Response(text="KinoSerial bot is running", status=200)
 
 
 async def start_web_server():
@@ -2468,11 +2457,9 @@ async def main():
             data["admins"].append(admin_id)
     save_data(data)
     runner = await start_web_server()
-    reminder_task = asyncio.create_task(vip_reminder_worker())
     try:
         await dp.start_polling(bot)
     finally:
-        reminder_task.cancel()
         await runner.cleanup()
         await bot.session.close()
 
